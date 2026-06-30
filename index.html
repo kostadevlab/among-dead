@@ -1,0 +1,863 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Among Dead — demo v0.1</title>
+<style>
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: #0b0e14;
+    color: #cdd6f4;
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    overflow: hidden;
+  }
+  #wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    gap: 10px;
+  }
+  canvas {
+    background: #11151f;
+    border: 1px solid #2a3142;
+    border-radius: 8px;
+    box-shadow: 0 10px 40px rgba(0,0,0,.5);
+  }
+  #hud { font-size: 14px; letter-spacing: .3px; }
+  #hud b { color: #a6e3a1; }
+  .danger { color: #f38ba8 !important; }
+  #banner {
+    position: fixed; inset: 0; display: none;
+    align-items: center; justify-content: center;
+    background: rgba(5,7,12,.82); flex-direction: column; gap: 14px;
+    text-align: center;
+  }
+  #banner h1 { margin: 0; font-size: 40px; }
+  #banner p { margin: 0; opacity: .8; }
+  #banner button {
+    margin-top: 8px; padding: 10px 22px; font-size: 16px; cursor: pointer;
+    background: #89b4fa; color: #0b0e14; border: 0; border-radius: 6px; font-weight: 600;
+  }
+  button.role {
+    padding: 18px 26px; font-size: 19px; cursor: pointer; color: #0b0e14;
+    border: 0; border-radius: 10px; font-weight: 700; min-width: 230px;
+  }
+  button.role:hover { filter: brightness(1.1); }
+  button.role small { opacity: .7; font-size: 12px; }
+  .hint { opacity: .55; font-size: 12px; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="hud">
+    Crew alive: <b id="crew">0</b> &nbsp;·&nbsp;
+    Zombies: <span id="zoms" class="danger">0</span> &nbsp;·&nbsp;
+    Weapon: <b id="weapon">Pistol</b> <span id="ammo"></span>
+  </div>
+  <canvas id="game" width="720" height="520"></canvas>
+  <div class="hint">Move: WASD/arrows · <b>Sheriff:</b> aim mouse, click/SPACE to attack, R reload, grab 🔫🏏🪓 chests · <b>Zombie:</b> touch crew to eat them</div>
+</div>
+
+<div id="menu" style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px;background:rgba(5,7,12,.9);text-align:center;">
+  <h1 style="margin:0;font-size:42px;">Among Dead</h1>
+  <p style="margin:0;opacity:.7;">Choose your side</p>
+  <div style="display:flex;gap:16px;flex-wrap:wrap;justify-content:center;">
+    <button class="role" onclick="startGame('sheriff')" style="background:#89dceb;">🔫 Play as Sheriff<br><small style="font-weight:400;">Survive the horde as long as you can</small></button>
+    <button class="role" onclick="startGame('zombie')" style="background:#a6e3a1;">🧟 Play as Zombie<br><small style="font-weight:400;">Hunt and eat the entire crew</small></button>
+  </div>
+</div>
+
+<div id="banner">
+  <h1 id="bannerTitle"></h1>
+  <p id="bannerText"></p>
+  <button onclick="location.reload()">Back to menu</button>
+</div>
+
+<script>
+const cv = document.getElementById('game');
+const ctx = cv.getContext('2d');
+const W = cv.width, H = cv.height;
+
+const rand = (a, b) => a + Math.random() * (b - a);
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+
+// ---- Sprites (Kenney Topdown Shooter) ----
+const SPRITE_KEYS = ['player','zombie','crew_blue','crew_brown','crew_red','crew_old','crew_green'];
+const IMG = {};
+let imagesReady = 0;
+for (const k of SPRITE_KEYS) {
+  const im = new Image();
+  im.onload = () => { im.ok = true; imagesReady++; };
+  im.src = 'assets/' + k + '.png';
+  IMG[k] = im;
+}
+const CREW_SPRITES = ['crew_blue','crew_brown','crew_red','crew_old','crew_green'];
+
+// draw a sprite rotated to `ang`, centered at x,y, scaled so its height ~= size
+function drawSprite(key, x, y, ang, size) {
+  const im = IMG[key];
+  if (!im || !im.ok) return false;
+  const scale = size / im.height;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(ang);
+  ctx.drawImage(im, -im.width*scale/2, -im.height*scale/2, im.width*scale, im.height*scale);
+  ctx.restore();
+  return true;
+}
+
+// a rotting, blood-smeared, grimy clawed hand reaching `reach` px up out of the ground
+function drawClaw(cx, groundY, reach, t, side) {
+  const handX = cx + side * 8;
+  const wristY = groundY - reach;
+  const palmY = wristY + 4;
+  ctx.save();
+  ctx.lineCap = 'round';
+
+  // forearm rising from the hole
+  ctx.strokeStyle = '#2f9c5a'; ctx.lineWidth = 5;
+  ctx.beginPath(); ctx.moveTo(handX, groundY + 3); ctx.lineTo(handX, wristY + 5); ctx.stroke();
+  // caked dirt/grime streaks down the forearm
+  ctx.strokeStyle = 'rgba(40,28,14,.55)'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(handX - 1.5, groundY); ctx.lineTo(handX - 1.5, wristY + 8); ctx.stroke();
+  ctx.strokeStyle = 'rgba(60,45,20,.4)'; ctx.lineWidth = 1.2;
+  ctx.beginPath(); ctx.moveTo(handX + 1.5, groundY); ctx.lineTo(handX + 1.5, wristY + 10); ctx.stroke();
+
+  // palm + a grime smudge and a blood smear
+  ctx.fillStyle = '#3ddc84';
+  ctx.beginPath(); ctx.arc(handX, palmY, 4.5, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = 'rgba(35,25,12,.5)';                 // grime patch
+  ctx.beginPath(); ctx.arc(handX - 1.5, palmY + 1, 2.2, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = 'rgba(140,0,18,.7)';                 // blood smear
+  ctx.beginPath(); ctx.arc(handX + 1.5, palmY - 1, 2.4, 0, Math.PI*2); ctx.fill();
+
+  // clawed fingers, spread and twitching, with bloodied tips
+  for (let i = -1; i <= 2; i++) {
+    const wig = Math.sin(t*0.3 + i*1.3) * 0.22;
+    const a = -Math.PI/2 + i*0.42 + wig;               // point up, fanned out
+    const len = i === 2 ? 6 : 9;                        // last = stubby thumb
+    const fx = handX + Math.cos(a)*len, fy = palmY + Math.sin(a)*len;
+    // finger
+    ctx.strokeStyle = '#3ddc84'; ctx.lineWidth = 2.4;
+    ctx.beginPath(); ctx.moveTo(handX, palmY); ctx.lineTo(fx, fy); ctx.stroke();
+    // blood coating the upper half of the claw
+    ctx.strokeStyle = '#8c0012'; ctx.lineWidth = 2.4;
+    ctx.beginPath(); ctx.moveTo((handX+fx)/2, (palmY+fy)/2); ctx.lineTo(fx, fy); ctx.stroke();
+    // dark claw tip
+    ctx.fillStyle = '#3a0008';
+    ctx.beginPath(); ctx.arc(fx, fy, 1.7, 0, Math.PI*2); ctx.fill();
+    // a hanging blood drip from a couple of claws (wiggles with the finger)
+    if (i === -1 || i === 1) {
+      const drip = 3 + 2*Math.abs(Math.sin(t*0.18 + i));
+      ctx.strokeStyle = 'rgba(160,0,20,.85)'; ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.moveTo(fx, fy); ctx.lineTo(fx, fy + drip); ctx.stroke();
+      ctx.fillStyle = '#b3001b';
+      ctx.beginPath(); ctx.arc(fx, fy + drip, 1.3, 0, Math.PI*2); ctx.fill();
+    }
+  }
+  ctx.restore();
+}
+
+// fixed blood/grime decals stamped over a zombie sprite (deterministic so they don't flicker)
+const GORE = [
+  { dx: -6, dy: -7, r: 3.2, c: 'rgba(150,0,18,.8)' },   // blood splat
+  { dx:  5, dy: -4, r: 2.6, c: 'rgba(175,12,22,.75)' },
+  { dx:  8, dy:  6, r: 2.2, c: 'rgba(120,0,14,.7)' },
+  { dx: -3, dy:  7, r: 3.4, c: 'rgba(38,27,13,.62)' },   // grime
+  { dx: -8, dy:  2, r: 2.0, c: 'rgba(58,44,20,.5)' },
+  { dx:  1, dy:  0, r: 1.8, c: 'rgba(60,45,20,.5)' },
+];
+function drawGore(x, y, ang, size) {
+  const scale = size / 34;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(ang);
+  for (const g of GORE) {
+    ctx.fillStyle = g.c;
+    ctx.beginPath();
+    ctx.arc(g.dx * scale, g.dy * scale, g.r * scale, 0, Math.PI*2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+// ---- Entities ----
+const PLAYER_SPEED = 2.4;
+const BOT_SPEED = 1.5;
+const ZOMBIE_SPEED = 1.85;     // a touch faster than crew, so they're a threat
+const INFECT_RANGE = 16;
+const REVEAL_RANGE = 70;       // how close before you can tell a hunting zombie apart
+const TASK_RANGE = 22;
+
+const COLORS = ['#f38ba8','#fab387','#f9e2af','#a6e3a1','#89dceb','#cba6f7','#eba0ac','#94e2d5'];
+
+// ---- Weapons ----
+// ranged: fires bullets, uses ammo. melee: swings in a short arc.
+const WEAPONS = {
+  pistol: { name: 'Pistol', icon: '🔫', kind: 'ranged', ammo: 8,  cd: 13 },
+  rifle:  { name: 'Rifle',  icon: '🔫', kind: 'ranged', ammo: 20, cd: 6 },
+  bat:    { name: 'Bat',    icon: '🏏', kind: 'melee',  range: 46, arc: 1.1, kill: false, knock: 26, stun: 50, cd: 22, color: '#cba6f7' },
+  axe:    { name: 'Axe',    icon: '🪓', kind: 'melee',  range: 40, arc: 0.9, kill: true,  knock: 10, stun: 20, cd: 30, color: '#f38ba8' },
+};
+const CHEST_POOL = ['pistol','rifle','bat','axe'];   // what chests can contain
+const CHEST_INTERVAL = 360;   // frames between chest spawns (~6s)
+const MAX_CHESTS = 3;
+
+// ---- Monster pop-outs ----
+const MONSTER_INTERVAL = 360;  // frames between pop-outs (~6s), ramps down over time
+const TELEGRAPH = 95;          // frames spent digging out before the monster bursts free
+const MAX_ZOMBIES = 9;         // cap concurrent zombies so it stays survivable
+
+let player, bots, tasks, state, tStart, bullets = [], particles = [], chests = [];
+let spawners = [], toast = null, nextChestAt = 0, nextMonsterAt = 0, flashAt = -99;
+let mode = 'sheriff';   // 'sheriff' = you survive, 'zombie' = you hunt the crew
+const mouse = { x: W/2, y: H/2 };
+
+function makeMonster(x, y) {
+  return {
+    x, y, r: 12, color: '#3ddc84',
+    isZombie: true, justTurned: true, isMonster: true,
+    tx: x, ty: y, name: 'Monster',
+    sprite: 'zombie', ang: rand(0, Math.PI*2), stun: 0, popAt: frame,
+  };
+}
+
+function makeBot(i, isZombie) {
+  return {
+    x: rand(60, W-60), y: rand(60, H-60),
+    r: 12, color: COLORS[i % COLORS.length],
+    isZombie, justTurned: false,
+    // wander target
+    tx: rand(60, W-60), ty: rand(60, H-60),
+    name: 'Bot ' + (i+1),
+    sprite: CREW_SPRITES[i % CREW_SPRITES.length],
+    ang: rand(0, Math.PI*2),
+    stun: 0,
+  };
+}
+
+function reset(selectedMode) {
+  mode = selectedMode || 'sheriff';
+  player = { x: W/2, y: H/2, r: 12, color: '#ffffff', alive: true,
+             role: mode, weapon: 'pistol', ammo: WEAPONS.pistol.ammo };
+  bullets = [];
+  particles = [];
+  chests = [];
+  spawners = [];
+  toast = null;
+  nextChestAt = 90;             // first chest appears shortly after GO
+  nextMonsterAt = 240;          // first monster pops out ~4s after GO (sheriff mode only)
+  flashAt = -99;
+  const N = mode === 'zombie' ? 7 : 6;
+  bots = [];
+  // sheriff mode hides one zombie among the crew; zombie mode = all crew (you're the threat)
+  const zombieIndex = mode === 'zombie' ? -1 : Math.floor(Math.random() * N);
+  for (let i = 0; i < N; i++) bots.push(makeBot(i, i === zombieIndex));
+
+  playFrames = 0;               // counts only while actually playing
+  state = 'countdown';
+  countdownStart = performance.now();
+  tStart = performance.now();
+  hideBanner();
+}
+
+const COUNTDOWN_MS = 3000;   // 3..2..1 then GO
+const ROUND_FRAMES = 60 * 60;  // survive/hunt window ~60s at 60fps
+let countdownStart = 0, playFrames = 0;
+
+// ---- Input ----
+const keys = {};
+addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  keys[k] = true;
+  if (['arrowup','arrowdown','arrowleft','arrowright',' '].includes(k)) e.preventDefault();
+  if (k === ' ') attack();       // Space attacks (shoot or swing)
+  if (k === 'r') reload();       // R reloads guns
+});
+addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+
+// aim + attack
+cv.addEventListener('mousemove', e => {
+  const rect = cv.getBoundingClientRect();
+  mouse.x = (e.clientX - rect.left) * (W / rect.width);
+  mouse.y = (e.clientY - rect.top) * (H / rect.height);
+});
+cv.addEventListener('mousedown', () => attack());
+
+let nextFireAt = 0, frame = 0;
+function attack() {
+  if (state !== 'play' || !player.alive || player.eaten) return;
+  if (player.role === 'zombie') return;               // zombie has no weapons — just eat
+  if (frame < nextFireAt) return;                     // attack-rate cap
+  const w = WEAPONS[player.weapon];
+  const a = Math.atan2(mouse.y - player.y, mouse.x - player.x);
+
+  if (w.kind === 'ranged') {
+    if (player.ammo <= 0) { player.emptyAt = frame; nextFireAt = frame + 12; return; }
+    bullets.push({ x: player.x + Math.cos(a)*18, y: player.y + Math.sin(a)*18,
+                   vx: Math.cos(a)*9, vy: Math.sin(a)*9, life: 70, ang: a });
+    player.ammo--;
+    player.muzzleAt = frame;
+    nextFireAt = frame + w.cd;
+  } else {
+    // melee swing: hit zombies inside the arc in front of the player
+    player.swingAt = frame; player.swingAng = a;
+    for (const z of bots) {
+      if (!z.isZombie) continue;
+      if (dist(player, z) > w.range) continue;
+      const za = Math.atan2(z.y - player.y, z.x - player.x);
+      let diff = Math.abs(((za - a + Math.PI) % (Math.PI*2)) - Math.PI);
+      if (diff > w.arc) continue;
+      // knockback + stun
+      z.x += Math.cos(za) * w.knock; z.y += Math.sin(za) * w.knock;
+      z.stun = w.stun;
+      burst(z.x, z.y, w.kill ? '#3ddc84' : '#cba6f7');
+      if (w.kill) z.dead = true;
+    }
+    nextFireAt = frame + w.cd;
+  }
+}
+function reload() {
+  if (state !== 'play' || !player.alive) return;
+  const w = WEAPONS[player.weapon];
+  if (w.kind !== 'ranged') return;
+  player.ammo = w.ammo;
+  player.reloadFlashAt = frame;
+}
+function burst(x, y, color) {
+  for (let i = 0; i < 10; i++) {
+    const a = rand(0, Math.PI*2), s = rand(1, 4);
+    particles.push({ x, y, vx: Math.cos(a)*s, vy: Math.sin(a)*s, life: rand(15, 30), color });
+  }
+}
+function bloodBurst(x, y) {
+  for (let i = 0; i < 8; i++) {
+    const a = rand(0, Math.PI*2), s = rand(1, 3.5);
+    particles.push({ x, y, vx: Math.cos(a)*s, vy: Math.sin(a)*s, life: rand(12, 28), color: '#b3001b' });
+  }
+}
+// dirt kicked up while a monster digs out (sprays upward, then settles)
+function dirt(x, y) {
+  for (let i = 0; i < 5; i++) {
+    const a = -Math.PI/2 + rand(-0.8, 0.8), s = rand(1.5, 3.8);
+    particles.push({ x: x + rand(-10,10), y, vx: Math.cos(a)*s, vy: Math.sin(a)*s,
+                     life: rand(14, 28), color: (i % 2) ? '#6b4a2b' : '#4a3320', grav: true });
+  }
+}
+
+function inputVec() {
+  let dx = 0, dy = 0;
+  if (keys['w'] || keys['arrowup']) dy -= 1;
+  if (keys['s'] || keys['arrowdown']) dy += 1;
+  if (keys['a'] || keys['arrowleft']) dx -= 1;
+  if (keys['d'] || keys['arrowright']) dx += 1;
+  const m = Math.hypot(dx, dy) || 1;
+  return { x: dx/m, y: dy/m };
+}
+
+// ---- Update ----
+function nearestTarget(b, list, pred) {
+  let best = null, bd = Infinity;
+  for (const t of list) {
+    if (pred && !pred(t)) continue;
+    const d = dist(b, t);
+    if (d < bd) { bd = d; best = t; }
+  }
+  return { best, bd };
+}
+
+function clamp(b) {
+  b.x = Math.max(b.r, Math.min(W - b.r, b.x));
+  b.y = Math.max(b.r, Math.min(H - b.r, b.y));
+}
+
+function step() {
+  if (state === 'countdown') {
+    if (performance.now() - countdownStart >= COUNTDOWN_MS) state = 'play';
+    return;   // everyone frozen while you get ready
+  }
+  if (state !== 'play') return;
+  playFrames++;
+
+  // player (frozen while being eaten)
+  if (player.alive && !player.eaten) {
+    const v = inputVec();
+    player.x += v.x * PLAYER_SPEED;
+    player.y += v.y * PLAYER_SPEED;
+    clamp(player);
+
+    // chests: walk over one to grab its weapon
+    for (const c of chests) {
+      if (!c.taken && dist(player, c) < 24) {
+        c.taken = true;
+        const wkey = c.weapon, w = WEAPONS[wkey];
+        player.weapon = wkey;
+        if (w.kind === 'ranged') player.ammo = w.ammo;
+        toast = { text: `Picked up ${w.name} ${w.icon}`, at: frame };
+      }
+    }
+    chests = chests.filter(c => !c.taken);
+  }
+
+  // spawn chests over time
+  if (frame >= nextChestAt && chests.length < MAX_CHESTS) {
+    chests.push({ x: rand(50, W-50), y: rand(50, H-50),
+                  weapon: CHEST_POOL[Math.floor(Math.random()*CHEST_POOL.length)],
+                  taken: false, bornAt: frame });
+    nextChestAt = frame + CHEST_INTERVAL;
+  }
+
+  // monster pop-outs: telegraph a spot, then a zombie bursts out and hunts (sheriff mode only)
+  const zCount = bots.filter(b => b.isZombie).length;
+  if (mode === 'sheriff' && frame >= nextMonsterAt && zCount + spawners.length < MAX_ZOMBIES) {
+    let x, y, tries = 0;
+    do { x = rand(40, W-40); y = rand(40, H-40); tries++; }
+    while (dist({x,y}, player) < 120 && tries < 25);   // not right on top of you
+    spawners.push({ x, y, popAt: frame + TELEGRAPH });
+    // pop-outs come a little faster as the game goes on (min ~3s)
+    const elapsed = frame - 240;
+    nextMonsterAt = frame + Math.max(180, MONSTER_INTERVAL - Math.floor(elapsed/8));
+  }
+  for (const s of spawners) {
+    if (frame >= s.popAt) {
+      bots.push(makeMonster(s.x, s.y));
+      burst(s.x, s.y, '#3ddc84');
+      dirt(s.x, s.y); dirt(s.x, s.y);   // big dirt spray as it bursts free
+      flashAt = frame;                  // screen flash for the scare
+      s.done = true;
+    } else if (frame % 5 === 0) {
+      dirt(s.x, s.y);                    // clods kicked up while digging
+    }
+  }
+  spawners = spawners.filter(s => !s.done);
+
+  // bots
+  const crewTargets = bots.filter(b => !b.isZombie);
+  for (const b of bots) {
+    // stunned (knocked back by a bat/axe) — hold still
+    if (b.stun > 0) { b.stun--; clamp(b); continue; }
+    // busy eating, or being eaten/held — hold still
+    if (b.eating) { continue; }
+    if (frame - (b.eatenAtFrame || -99) <= 1) { continue; }
+    let speed = b.isZombie ? ZOMBIE_SPEED : BOT_SPEED;
+    let tx, ty;
+
+    if (b.isZombie) {
+      // hunt nearest non-zombie (player or crew bot)
+      const candidates = [player.alive ? player : null, ...crewTargets].filter(Boolean);
+      const { best } = nearestTarget(b, candidates);
+      if (best) { tx = best.x; ty = best.y; }
+      else { tx = b.tx; ty = b.ty; }
+    } else {
+      // crew: flee from close threats (zombies, and you if you're the zombie)
+      const threats = bots.filter(z => z.isZombie);
+      if (player.alive && player.role === 'zombie') threats.push(player);
+      const { best, bd } = nearestTarget(b, threats);
+      if (best && bd < REVEAL_RANGE) {
+        tx = b.x + (b.x - best.x); ty = b.y + (b.y - best.y);
+        speed = BOT_SPEED * 1.2;
+      } else {
+        if (dist(b, {x:b.tx,y:b.ty}) < 12) { b.tx = rand(60, W-60); b.ty = rand(60, H-60); }
+        tx = b.tx; ty = b.ty;
+      }
+    }
+
+    const a = Math.atan2(ty - b.y, tx - b.x);
+    b.ang = a;
+    b.x += Math.cos(a) * speed;
+    b.y += Math.sin(a) * speed;
+    clamp(b);
+  }
+
+  // player faces the crosshair
+  if (player.alive) player.ang = Math.atan2(mouse.y - player.y, mouse.x - player.x);
+
+  // eating: zombies devour crew (pause + blood, then victim turns) and devour the player
+  for (const z of bots) {
+    if (!z.isZombie) { z.eating = false; continue; }
+    z.eating = false;
+
+    // eat the player if caught (only when you're the sheriff/crew)
+    if (player.role === 'sheriff' && player.alive && !player.eaten && dist(z, player) < INFECT_RANGE + 2) {
+      player.eaten = true; player.eatenAt = frame; player.eatenBy = z;
+    }
+    if (player.eaten && player.eatenBy === z) { z.eating = true; }
+
+    // otherwise, eat the nearest crew member
+    if (!z.eating) {
+      for (const b of bots) {
+        if (b.isZombie || b.dead) continue;
+        if (dist(z, b) < INFECT_RANGE + 2) {
+          z.eating = true;
+          b.eatenAtFrame = frame;
+          b.eatProgress = (b.eatProgress || 0) + 1;
+          if (frame % 5 === 0) bloodBurst(b.x, b.y);
+          if (b.eatProgress > 34) {                       // fully devoured -> rises as a zombie
+            b.isZombie = true; b.justTurned = true; b.color = '#3ddc84';
+            b.eatProgress = 0; burst(b.x, b.y, '#3ddc84');
+          }
+          break;
+        }
+      }
+    }
+  }
+
+  // being-eaten progression for the player
+  if (player.eaten) {
+    if (frame % 4 === 0) bloodBurst(player.x + rand(-8,8), player.y + rand(-8,8));
+  }
+
+  // YOU as the zombie: devour any crew you touch, they rise as your horde
+  if (player.role === 'zombie' && player.alive) {
+    for (const b of bots) {
+      if (b.isZombie || b.dead) continue;
+      if (dist(player, b) < INFECT_RANGE + 4) {
+        b.eatenAtFrame = frame;
+        b.eatProgress = (b.eatProgress || 0) + 1;
+        if (frame % 5 === 0) bloodBurst(b.x, b.y);
+        if (b.eatProgress > 22) {
+          b.isZombie = true; b.justTurned = true; b.color = '#3ddc84';
+          b.eatProgress = 0; burst(b.x, b.y, '#3ddc84');
+          toast = { text: 'Crew turned! 🧟', at: frame };
+        }
+      }
+    }
+  }
+
+  // bullets
+  for (const bl of bullets) {
+    bl.x += bl.vx; bl.y += bl.vy; bl.life--;
+    if (bl.x < 0 || bl.x > W || bl.y < 0 || bl.y > H) bl.life = 0;
+    for (const z of bots) {
+      if (!z.isZombie || z.dead) continue;
+      if (dist(bl, z) < z.r + 6) { z.dead = true; bl.life = 0; burst(z.x, z.y, '#3ddc84'); }
+    }
+  }
+  bullets = bullets.filter(b => b.life > 0);
+  bots = bots.filter(b => !b.dead);
+
+  // particles
+  for (const p of particles) {
+    p.x += p.vx; p.y += p.vy; p.life--;
+    if (p.grav) { p.vy += 0.25; p.vx *= 0.98; }   // dirt arcs and falls
+    else { p.vx *= 0.92; p.vy *= 0.92; }
+  }
+  particles = particles.filter(p => p.life > 0);
+
+  // win/lose
+  const crewLeft = bots.filter(b => !b.isZombie).length;
+  const secs = Math.floor(playFrames / 60);
+  if (mode === 'zombie') {
+    if (crewLeft === 0) return end(true, `You devoured the entire crew in ${secs}s. The horde feasts!`);
+  } else {
+    if (player.eaten && frame - player.eatenAt > 45) {
+      player.alive = false;
+      return end(false, `A monster ate you alive! You survived ${secs}s.`);
+    }
+  }
+}
+
+// ---- Render ----
+function drawEntity(e, isZombieLook) {
+  ctx.beginPath();
+  ctx.arc(e.x, e.y, e.r, 0, Math.PI*2);
+  ctx.fillStyle = isZombieLook ? '#3ddc84' : e.color;
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = 'rgba(0,0,0,.35)';
+  ctx.stroke();
+  // little visor
+  ctx.beginPath();
+  ctx.arc(e.x + e.r*0.25, e.y - e.r*0.15, e.r*0.45, 0, Math.PI*2);
+  ctx.fillStyle = isZombieLook ? '#0b3d1e' : '#bcd6f7';
+  ctx.fill();
+}
+
+function render() {
+  ctx.clearRect(0,0,W,H);
+
+  // ---- screen rumble while monsters dig (and a jolt when they burst out) ----
+  let shakeAmt = 0;
+  for (const s of spawners) {
+    const p = 1 - (s.popAt - frame) / TELEGRAPH;     // grows as it nears the surface
+    shakeAmt = Math.max(shakeAmt, 1 + p * 3.5);
+  }
+  if (frame - flashAt < 10) shakeAmt = Math.max(shakeAmt, 7 * (1 - (frame - flashAt)/10));  // burst jolt
+  if (player.eaten) shakeAmt = Math.max(shakeAmt, 3);
+  const shakeX = shakeAmt ? rand(-shakeAmt, shakeAmt) : 0;
+  const shakeY = shakeAmt ? rand(-shakeAmt, shakeAmt) : 0;
+  ctx.save();
+  ctx.translate(shakeX, shakeY);   // world layer shakes; UI/crosshair restored before overlays
+
+  // floor grid
+  ctx.strokeStyle = 'rgba(255,255,255,.03)';
+  for (let x=0;x<W;x+=40){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();}
+  for (let y=0;y<H;y+=40){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();}
+
+  // chests
+  for (const c of chests) {
+    const bob = Math.sin((frame - c.bornAt)/12) * 2;
+    ctx.save();
+    ctx.translate(c.x, c.y + bob);
+    // crate body
+    ctx.fillStyle = '#8a5a2b'; ctx.fillRect(-13, -10, 26, 20);
+    ctx.fillStyle = '#a9712f'; ctx.fillRect(-13, -10, 26, 7);   // lid
+    ctx.strokeStyle = '#3a2410'; ctx.lineWidth = 2; ctx.strokeRect(-13, -10, 26, 20);
+    ctx.fillStyle = '#f9e2af'; ctx.fillRect(-2, -10, 4, 20);    // latch
+    // floating icon
+    ctx.font = '16px system-ui'; ctx.textAlign = 'center';
+    ctx.fillText(WEAPONS[c.weapon].icon, 0, -16);
+    ctx.restore();
+    ctx.textAlign = 'start';
+  }
+
+  // monster spawners — a zombie claws its way up out of the ground
+  for (const s of spawners) {
+    const p = 1 - (s.popAt - frame) / TELEGRAPH;   // 0 -> 1 as it nears popping
+    const cx = s.x, cy = s.y;
+    const shake = p < 0.55 ? rand(-1.5, 1.5) : 0;  // ground trembles while digging
+    const rw = 10 + p * 20, rh = 5 + p * 9;        // hole grows
+
+    // dark hole opening in the ground
+    ctx.fillStyle = `rgba(8,12,16,${0.4 + 0.5*p})`;
+    ctx.beginPath(); ctx.ellipse(cx + shake, cy, rw, rh, 0, 0, Math.PI*2); ctx.fill();
+    // raised dirt rim
+    ctx.strokeStyle = '#4a3320'; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.ellipse(cx + shake, cy, rw, rh, 0, 0, Math.PI*2); ctx.stroke();
+
+    // clawed hands burst up and grasp the air first
+    if (p > 0.1 && p < 0.62) {
+      const hp = Math.min(1, (p - 0.1) / 0.32);      // rise quickly, then hold
+      const reach = hp * 24;
+      drawClaw(cx + shake, cy, reach, frame, -1);
+      drawClaw(cx + shake, cy, reach * 0.88, frame + 7, 1);
+    }
+
+    // the zombie rising out (second half of the dig): clip so only the part above ground shows
+    if (p > 0.4) {
+      const e = (p - 0.4) / 0.6;                    // 0 -> 1 emergence
+      const size = 34;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(cx - 28, 0, 56, cy + rh*0.4);        // ground line at the hole — clip below it
+      ctx.clip();
+      const centerY = cy + (1 - e) * size * 0.95;   // starts underground, rises to the hole
+      drawSprite('zombie', cx + shake, centerY, -Math.PI/2, size);  // facing up, clawing out
+      drawGore(cx + shake, centerY, -Math.PI/2, size);              // blood + grime on the body
+      ctx.restore();
+    }
+
+    // pulsing red warning ring + "!"
+    ctx.strokeStyle = `rgba(243,139,168,${0.45 + 0.45*Math.sin(frame/2.5)})`;
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.ellipse(cx, cy, rw + 6, rh + 4, 0, 0, Math.PI*2); ctx.stroke();
+    ctx.fillStyle = '#f38ba8'; ctx.font = 'bold 22px system-ui'; ctx.textAlign = 'center';
+    ctx.fillText('!', cx, cy - rh - 14);
+    ctx.textAlign = 'start';
+  }
+
+  // bots — a hunting zombie within REVEAL_RANGE of player looks zombified
+  for (const b of bots) {
+    let look = false;
+    if (b.isZombie) {
+      if (b.isMonster || b.justTurned) look = true;      // monsters & turned crew are visibly zombies
+      else if (player.alive && dist(b, player) < REVEAL_RANGE) look = true; // close enough to notice
+    }
+    // pop-in: monsters lunge out at scale-up for the first few frames
+    let size = 34;
+    if (b.isMonster && frame - b.popAt < 10) size = 34 * (0.5 + 0.5*(frame - b.popAt)/10);
+    if (!drawSprite(look ? 'zombie' : b.sprite, b.x, b.y, b.ang, size)) drawEntity(b, look);
+    if (look) drawGore(b.x, b.y, b.ang, size);          // bloody, grimy horde
+    // labels
+    ctx.font = 'bold 10px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    if (look) { ctx.fillStyle = '#f38ba8'; ctx.fillText(b.isMonster ? 'MONSTER' : 'ZOMBIE', b.x, b.y - b.r - 5); }
+    else { ctx.fillStyle = 'rgba(205,214,244,.6)'; ctx.fillText('Crew', b.x, b.y - b.r - 5); }
+    ctx.textAlign = 'start';
+  }
+
+  // bullets (glowing tracer)
+  for (const bl of bullets) {
+    ctx.strokeStyle = 'rgba(249,226,175,.6)'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(bl.x, bl.y);
+    ctx.lineTo(bl.x - bl.vx*1.6, bl.y - bl.vy*1.6); ctx.stroke();
+    ctx.beginPath(); ctx.arc(bl.x, bl.y, 4, 0, Math.PI*2);
+    ctx.fillStyle = '#fff6cf'; ctx.fill();
+  }
+
+  // particles
+  for (const p of particles) {
+    ctx.globalAlpha = Math.max(0, p.life / 30);
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x-2, p.y-2, 4, 4);
+    ctx.globalAlpha = 1;
+  }
+
+  if (player.alive) {
+    const t = performance.now();
+
+    // melee swing arc (brief)
+    const w = WEAPONS[player.weapon];
+    if (w.kind === 'melee' && player.swingAt != null && frame - player.swingAt < 7) {
+      ctx.beginPath();
+      ctx.moveTo(player.x, player.y);
+      ctx.arc(player.x, player.y, w.range, player.swingAng - w.arc, player.swingAng + w.arc);
+      ctx.closePath();
+      ctx.fillStyle = (w.color || '#cba6f7') + '66';
+      ctx.fill();
+    }
+
+    // pulsing glow halo so YOU pop out from the bots
+    const pulse = 0.5 + 0.5*Math.sin(t/200);
+    ctx.beginPath();
+    ctx.arc(player.x, player.y, player.r + 7 + pulse*4, 0, Math.PI*2);
+    ctx.strokeStyle = `rgba(137,220,235,${0.4 + 0.5*pulse})`;
+    ctx.lineWidth = 3; ctx.stroke();
+
+    const playerSprite = player.role === 'zombie' ? 'zombie' : 'player';
+    if (!drawSprite(playerSprite, player.x, player.y, player.ang || 0, 38)) {
+      drawEntity(player, player.role === 'zombie');
+      ctx.beginPath(); ctx.arc(player.x, player.y, player.r+3, 0, Math.PI*2);
+      ctx.strokeStyle = '#89dceb'; ctx.lineWidth = 2; ctx.stroke();
+    }
+
+    // muzzle flash at the gun
+    if (player.muzzleAt != null && frame - player.muzzleAt < 4) {
+      const a = player.ang || 0;
+      const mx = player.x + Math.cos(a)*22, my = player.y + Math.sin(a)*22;
+      ctx.beginPath(); ctx.arc(mx, my, 7, 0, Math.PI*2);
+      ctx.fillStyle = '#ffe27a'; ctx.fill();
+    }
+
+    // bobbing "YOU" label + pointer above the player
+    const bob = Math.sin(t/200) * 3;
+    const ly = player.y - player.r - 18 + bob;
+    ctx.font = 'bold 13px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#89dceb';
+    ctx.fillText('YOU', player.x, ly);
+    // little triangle pointer
+    ctx.beginPath();
+    ctx.moveTo(player.x, ly + 12);
+    ctx.lineTo(player.x - 6, ly + 4);
+    ctx.lineTo(player.x + 6, ly + 4);
+    ctx.closePath();
+    ctx.fillStyle = '#89dceb';
+    ctx.fill();
+    ctx.textAlign = 'start';
+  }
+
+  ctx.restore();   // end world-shake layer — overlays below stay steady
+
+  // countdown overlay
+  if (state === 'countdown') {
+    const remain = COUNTDOWN_MS - (performance.now() - countdownStart);
+    const secs = Math.ceil(remain / 1000);
+    const label = secs > 0 ? String(secs) : 'GO!';
+    ctx.fillStyle = 'rgba(5,7,12,.45)';
+    ctx.fillRect(0,0,W,H);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#f9e2af';
+    ctx.font = 'bold 110px system-ui, sans-serif';
+    ctx.fillText(label, W/2, H/2 + 30);
+    ctx.fillStyle = '#cdd6f4';
+    ctx.font = '18px system-ui, sans-serif';
+    const tip = mode === 'zombie'
+      ? 'You are the ZOMBIE — hunt down and eat the entire crew!'
+      : 'You are the glowing "YOU" marker. Survive the horde as long as you can!';
+    ctx.fillText(tip, W/2, H/2 + 90);
+    ctx.textAlign = 'start';
+  }
+
+  // crosshair (sheriff only)
+  if (state === 'play' && player.alive && player.role !== 'zombie') {
+    ctx.strokeStyle = 'rgba(243,139,168,.9)'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(mouse.x, mouse.y, 8, 0, Math.PI*2); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(mouse.x-12, mouse.y); ctx.lineTo(mouse.x-4, mouse.y);
+    ctx.moveTo(mouse.x+4, mouse.y); ctx.lineTo(mouse.x+12, mouse.y);
+    ctx.moveTo(mouse.x, mouse.y-12); ctx.lineTo(mouse.x, mouse.y-4);
+    ctx.moveTo(mouse.x, mouse.y+4); ctx.lineTo(mouse.x, mouse.y+12);
+    ctx.stroke();
+  }
+
+  // scare flash when a monster bursts out
+  if (frame - flashAt < 8) {
+    ctx.fillStyle = `rgba(243,139,168,${0.28 * (1 - (frame - flashAt)/8)})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // being-eaten overlay
+  if (player.eaten) {
+    ctx.fillStyle = `rgba(120,0,16,${0.25 + 0.2*Math.abs(Math.sin(frame/3))})`;
+    ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffd7dd';
+    ctx.font = 'bold 44px system-ui, sans-serif';
+    const jitter = rand(-3, 3);
+    ctx.fillText('BEING EATEN!', W/2 + jitter, H/2 + jitter);
+    ctx.textAlign = 'start';
+  }
+
+  const curW = WEAPONS[player.weapon];
+
+  // out-of-ammo prompt (ranged only)
+  if (state === 'play' && player.alive && curW.kind === 'ranged' && player.ammo <= 0) {
+    ctx.textAlign = 'center';
+    ctx.fillStyle = (frame % 30 < 15) ? '#f38ba8' : '#cdd6f4';
+    ctx.font = 'bold 16px system-ui, sans-serif';
+    ctx.fillText('OUT OF AMMO — press R to reload, or grab a weapon from a chest', W/2, 28);
+    ctx.textAlign = 'start';
+  }
+
+  // pickup toast
+  if (toast && frame - toast.at < 90) {
+    ctx.textAlign = 'center';
+    ctx.globalAlpha = Math.min(1, (90 - (frame - toast.at)) / 30);
+    ctx.fillStyle = '#a6e3a1';
+    ctx.font = 'bold 20px system-ui, sans-serif';
+    ctx.fillText(toast.text, W/2, H - 24);
+    ctx.globalAlpha = 1; ctx.textAlign = 'start';
+  }
+
+  // hud
+  if (mode === 'zombie') {
+    document.getElementById('weapon').textContent = 'ZOMBIE 🧟 — eat the crew';
+    document.getElementById('ammo').textContent = '';
+  } else {
+    document.getElementById('weapon').textContent = curW.name + ' ' + curW.icon;
+    document.getElementById('ammo').textContent = curW.kind === 'ranged' ? ('· Ammo: ' + player.ammo) : '· melee';
+  }
+  document.getElementById('crew').textContent = bots.filter(b=>!b.isZombie).length + (player.alive && player.role==='sheriff'?1:0);
+  document.getElementById('zoms').textContent = bots.filter(b=>b.isZombie).length;
+}
+
+function loop() {
+  frame++;
+  if (state !== 'menu') { step(); render(); }
+  requestAnimationFrame(loop);
+}
+
+// ---- Menu / Banner ----
+function startGame(selectedMode) {
+  document.getElementById('menu').style.display = 'none';
+  reset(selectedMode);
+}
+function end(win, msg) {
+  state = 'over';
+  const won = win ? (mode === 'zombie' ? 'The horde wins!' : 'You survived!') : 'Game over';
+  document.getElementById('bannerTitle').textContent = won;
+  document.getElementById('bannerText').textContent = msg;
+  document.getElementById('banner').style.display = 'flex';
+}
+function hideBanner(){ document.getElementById('banner').style.display = 'none'; }
+
+state = 'menu';     // show the side-select menu first
+loop();
+</script>
+</body>
+</html>
